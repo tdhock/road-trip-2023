@@ -1,6 +1,27 @@
 library(data.table)
-gas <- fread("gas.tsv")
-sum(gas$USD)
+### Read csv file, and lookup lat/long coords if not already
+### known/cached, then return joined data.
+read_lat_lon <- function(f.csv, address.col){
+  f.data <- fread(f.csv)
+  no.suffix <- sub("[.][^.]+", "", f.csv)
+  lat_lon.csv <- paste0(no.suffix, "_lat_lon.csv")
+  lat.lon.old <- if(file.exists(lat_lon.csv)){
+    unique(fread(lat_lon.csv))
+  }else{
+    data.table(address=character(), lat=numeric(), long=numeric())
+  }
+  on.vec <- c(address=address.col)
+  join.dt <- lat.lon.old[f.data, on=on.vec]
+  lookup.dt <- join.dt[is.na(lat)]
+  lat.lon.new <- tidygeocoder::geo(
+    address=lookup.dt[["address"]], 
+    method="arcgis")
+  lat.lon.all <- rbind(lat.lon.old, lat.lon.new)
+  fwrite(lat.lon.all, lat_lon.csv)
+  lat.lon.all[f.data, on=on.vec]
+}
+gas <- read_lat_lon("gas.tsv", "city")
+total.USD <- sum(gas$USD)
 int.pattern <- list("[0-9]+", as.integer)
 date.pattern <- nc::alternatives_with_shared_groups(
   month=int.pattern,
@@ -13,29 +34,15 @@ gas[, date.std := nc::capture_first_vec(
   date.pattern
 )[, sprintf("%d-%02d-%02d", ifelse(year<2000,2000+year,year), month, day)] ]
 gas[, datetime := suppressWarnings(strptime(paste(date.std, time), "%Y-%m-%d %H:%M"))]
-if(file.exists("gas_lat_lon.csv")){
-  lat.lon.dt <- fread("gas_lat_lon.csv")
-}else{
-  ## na.dt <- lat.lon.dt[is.na(lat)]
-  ## lat.lon.tib <- na.dt[, tidygeocoder::geo(
-  ##   city=city, state=state, method="osm")]
-  lat.lon.tib <- tidygeocoder::geo(
-    address=gas[['city']], 
-    method="arcgis")
-  lat.lon.dt <- data.table(lat.lon.tib)
-  fwrite(lat.lon.dt, "gas_lat_lon.csv")
-}
 STATE.pattern <- list(
   ".*",
   ", ",
   STATE=".*")
-gas.more <- nc::capture_first_df(gas, city=STATE.pattern)
-gas.join <- data.table(gas.more, lat.lon.dt)
-(gas.ord <- gas.join[order(datetime), .(datetime, city, USD, lat, long)])
-gas.ord[, .(datetime, city, USD, lat)]
+gas.more <- nc::capture_first_df(gas, address=STATE.pattern)
+(gas.ord <- gas.more[order(datetime), .(datetime, address, USD, lat, long)])
+gas.ord[, .(datetime, address, USD, lat)]
 library(ggplot2)
 
-##data("UStornadoes", package="animint2")
 USpolygons <- animint2::map_data("state")
 center <- function(x)(min(x)+max(x))/2
 name.dt <- data.table(USpolygons)[, .(
@@ -84,24 +91,14 @@ ggplot()+
     data=gas.ord)+
   coord_equal()
 
-overnights <- fread("overnights.tsv")
-if(file.exists("overnights_lat_lon.csv")){
-  o.lat.lon.dt <- fread("overnights_lat_lon.csv")
-}else{
-  o.lat.lon.tib <- tidygeocoder::geo(
-    address=overnights[['where']], 
-    method="arcgis")
-  o.lat.lon.dt <- data.table(o.lat.lon.tib)
-  fwrite(o.lat.lon.dt, "overnights_lat_lon.csv")
-}
-overnights.join <- data.table(overnights, o.lat.lon.dt[, .(lat, long)])
+overnights <- read_lat_lon("overnights.tsv", "where")
 month2int <- c(
   May=5,
   June=6,
   July=7,
   Aug=8)
 overnights.day <- nc::capture_first_df(
-  overnights.join, 
+  overnights, 
   nights=list(
     month=".*?", function(x)month2int[x],
     " ", 
@@ -115,9 +112,9 @@ names(overnights.day)
 names(gas.ord)
 
 stops.dt <- rbind(
-  data.table(gas.ord[, .(datetime, lat, long, where=city, stop="gas")]),
+  data.table(gas.ord[, .(datetime, lat, long, address, stop="gas")]),
   data.table(overnights.day[, .(
-    datetime, lat, long, where, stop=ifelse(chez=="", "camping", "indoors"))])
+    datetime, lat, long, address, stop=ifelse(chez=="", "camping", "indoors"))])
 )[order(datetime)]
 gg <- ggplot()+
   theme_bw()+
@@ -153,7 +150,7 @@ gg <- ggplot()+
     axis.line=element_blank(), axis.text=element_blank(), 
     axis.ticks=element_blank(), axis.title=element_blank())+
   coord_equal()+
-  ggtitle("Road trip May-Aug 2023")
+  ggtitle(paste0("Road trip May-Aug 2023, total gas cost = $", total.USD))
 png("figure-map-of-stops-on-road-trip-2023.png", width=10, height=4, units="in", res=100)
 print(gg)
 dev.off()
